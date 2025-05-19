@@ -1,7 +1,7 @@
 [project]
 name = "MIDAS"
 version = "0.1.0"
-description = "Mixed Data Sampling package."
+description = "Mixed Data Sampling for Time-Series Nowcasting and Forecasting."
 authors = [
   { name = "Renato Vassallo", email = "renato.vassallo@bse.eu" }
 ]
