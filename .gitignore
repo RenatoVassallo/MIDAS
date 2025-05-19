@@ -18,3 +18,5 @@ sessions/
 build/
 test.ipynb
 *.egg-info
+tutorial/Nowcasting_USA_Renato.ipynb
+tutorial/Nowcasting_USA_HandsOn.ipynb
