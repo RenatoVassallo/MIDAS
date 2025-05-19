@@ -6,16 +6,16 @@ def prepare_data(lf_data, hf_data_list, xlag_list, ylag, horizon, start_date=Non
     Prepare data for mixed-frequency regression with one or multiple high-frequency datasets.
 
     Args:
-        lf_data (Series): Low-frequency time series
-        hf_data_list (list of Series): List of high-frequency time series
-        xlag_list (list of int or str): List of high-frequency lags for each dataset
-        ylag (int or str): Number of low-frequency lags
-        horizon (int): Forecast horizon
-        start_date (date, optional): Start date for data preparation
-        end_date (date, optional): End date for data preparation
+        lf_data (Series): Low-frequency target variable (e.g., GDP)
+        hf_data_list (list of Series): List of high-frequency predictors
+        xlag_list (list of int or str): HF lags per predictor
+        ylag (int or str): Number of LF autoregressive lags
+        horizon (int): Forecast horizon (0 = nowcast, 1+ = steps ahead)
+        start_date (date): Start of training window
+        end_date (date): Forecast origin
 
     Returns:
-        tuple: Prepared data for regression and forecasting
+        tuple: y_train, ylags, x_train_list..., y_forecast_target, y_forecast_lags, x_forecast_list...
     """
     num_hf = len(hf_data_list)
     assert len(xlag_list) == num_hf, "Number of xlags must match number of high-frequency datasets"
@@ -32,19 +32,19 @@ def prepare_data(lf_data, hf_data_list, xlag_list, ylag, horizon, start_date=Non
     if (start_date is None) or (start_date < min_date_y):
         start_date = min_date_y
 
-    if end_date is None:
-        end_date = lf_data.index[-2]
-
     max_date = lf_data.index[-1]
     max_hf_end_date = min([hf_data.index[-1] for hf_data in hf_data_list])
-
     if max_date > max_hf_end_date:
         max_date = next(d for d in reversed(lf_data.index) if d < max_hf_end_date)
 
-    if end_date > max_date:
+    if end_date is None or end_date > max_date:
         end_date = max_date
 
-    forecast_start_date = lf_data.index[lf_data.index.get_loc(end_date) + 1]
+    # ✅ Adjust forecast target alignment based on horizon
+    if horizon == 0:
+        forecast_start_date = end_date  # Nowcast: target is current period
+    else:
+        forecast_start_date = lf_data.index[lf_data.index.get_loc(end_date) + 1]
 
     ylags = None
     if ylag > 0:
@@ -67,7 +67,8 @@ def prepare_data(lf_data, hf_data_list, xlag_list, ylag, horizon, start_date=Non
         ylags[forecast_start_date:max_date] if ylag > 0 else None,
         *[x.loc[forecast_start_date:] for x in x_frames]
     )
-
+    
+    
 def calculate_lags(lag, time_series):
     if isinstance(lag, str):
         return parse_lag_string(lag, data_freq(time_series)[0])
