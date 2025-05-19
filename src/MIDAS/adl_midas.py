@@ -80,13 +80,14 @@ class MIDAS:
         }
 
     def fit(self, data_dict, poly_list=None):
+        # ---------- AR model training ----------
         if data_dict is None:
-            # AR-only model training: use data up to current rolling end date
+            # Train AR model using LF data only, up to current_end_date (exclusive)
             end_idx = self.low_freq_series.index.get_loc(self.current_end_date)
-            y = self.low_freq_series.iloc[:end_idx + 1].dropna()
+            y = self.low_freq_series.iloc[:end_idx].dropna()  # exclude current_end_date
 
             if len(y) <= self.lf_lags:
-                raise ValueError(f"Not enough observations for AR({self.lf_lags}) model at {self.current_end_date}.")
+                raise ValueError(f"Not enough observations for AR({self.lf_lags}) at {self.current_end_date}.")
 
             self.ar_model = AutoReg(y, lags=self.lf_lags, old_names=False).fit()
             return self.ar_model
@@ -173,13 +174,15 @@ class MIDAS:
         Returns:
             pd.DataFrame: Forecasted values with datetime index.
         """
+        # ---------- AR model forecast ----------
         if data_dict is None:
-            # AR-only forecast
-            idx_pos = self.low_freq_series.index.get_loc(self.current_end_date) + 1
-            if idx_pos >= len(self.low_freq_series):
-                raise IndexError(f"Cannot forecast beyond available index at {self.current_end_date}.")
+            if self.ar_model is None:
+                raise ValueError("AR model is not fitted. Call `.fit()` first.")
+
+            idx_pos = self.low_freq_series.index.get_loc(self.current_end_date)
             forecast_idx = self.low_freq_series.index[idx_pos]
 
+            # True one-step-ahead forecast
             forecast = self.ar_model.predict(start=self.ar_model.nobs, end=self.ar_model.nobs)
             return pd.DataFrame(forecast.values.reshape(-1, 1), index=[forecast_idx], columns=["y_forecast"])
 
@@ -208,17 +211,14 @@ class MIDAS:
             xw_list.append(xw)
             offset += method.num_params
 
-        # Build forecast as intercept + weighted regressors
         yf = intercept + sum(b * xw for b, xw in zip(betas, xw_list))
 
-        # Add AR component if available
         if y_forecast_lags is not None:
             ar_params = a[offset:]
             ylags = y_forecast_lags.values if isinstance(y_forecast_lags, pd.DataFrame) else y_forecast_lags
             for i in range(len(ar_params)):
                 yf += ar_params[i] * ylags[:, i]
 
-        # Return forecast with appropriate datetime index
         forecast_index = x_forecast_list[0].index
         return pd.DataFrame(yf, index=forecast_index, columns=["y_forecast"])
 
@@ -229,7 +229,7 @@ class MIDAS:
         Args:
             start_date (datetime): Start of training window.
             end_date (datetime): First forecast origin.
-            alignment_lag (int): h-step-ahead forecast.
+            alignment_lag (int): h-step-ahead forecast. Use 0 for nowcasting.
             poly_list (list of str): Polynomial types per regressor (only for MIDAS).
             verbose (bool): If True, print progress and diagnostics.
 
@@ -238,10 +238,17 @@ class MIDAS:
         """
         preds, targets, dates = [], [], []
 
+        is_ar_only = len(self.high_freq_series_list) == 0
         forecast_start_loc = self.low_freq_series.index.get_loc(end_date)
+
         if alignment_lag < 0:
             raise ValueError("alignment_lag must be ≥ 0")
-        max_idx = len(self.low_freq_series) if alignment_lag == 0 else len(self.low_freq_series) - alignment_lag
+
+        # Allow last step for AR-only (it needs just y_t to predict y_{t+1})
+        max_idx = len(self.low_freq_series) if is_ar_only else (
+            len(self.low_freq_series) if alignment_lag == 0 else len(self.low_freq_series) - alignment_lag
+        )
+
         model_end_dates = self.low_freq_series.index[forecast_start_loc:max_idx]
 
         if len(model_end_dates) == 0:
@@ -252,34 +259,20 @@ class MIDAS:
             )
 
         for estimate_end in model_end_dates:
-            self.current_end_date = estimate_end  # For AR-only slicing logic
+            self.current_end_date = estimate_end
 
             if verbose:
                 print(f"Rolling window end = {estimate_end} | Forecast horizon = {alignment_lag}")
 
             try:
-                # Handle AR-only case by passing None
-                data_dict = self.prepare_data(
-                    alignment_lag=alignment_lag,
-                    start_date=start_date,
-                    end_date=estimate_end
-                )
-
-                if data_dict is not None and len(data_dict["y_forecast_target"]) < alignment_lag:
-                    if verbose:
-                        print(f"Skipping {estimate_end} due to insufficient forecast horizon.")
-                    continue
-
-                self.fit(data_dict, poly_list=poly_list)
-                forecast = self.predict(data_dict)
-
-                if data_dict is None:
-                    # AR-only: get true value manually from original series
-                    idx_pos = self.low_freq_series.index.get_loc(estimate_end) + alignment_lag
-                    if idx_pos >= len(self.low_freq_series):
-                        if verbose:
-                            print(f"Skipping {estimate_end}: no true target available.")
+                # === AR-only logic ===
+                if is_ar_only:
+                    # Skip first step if no lagged value is available
+                    idx_pos = self.low_freq_series.index.get_loc(estimate_end)
+                    if idx_pos < self.lf_lags:
                         continue
+
+                    y_train = self.low_freq_series.iloc[:idx_pos]  # train up to t-1
                     true = self.low_freq_series.iloc[idx_pos]
                     dt = self.low_freq_series.index[idx_pos]
 
@@ -287,12 +280,33 @@ class MIDAS:
                         if verbose:
                             print(f"Skipping {dt} due to missing target.")
                         continue
+
+                    ar_model = AutoReg(y_train, lags=self.lf_lags, old_names=False).fit()
+                    forecast = ar_model.predict(start=len(y_train), end=len(y_train))
+                    pred = forecast.iloc[0]
+
+                # === MIDAS logic ===
                 else:
-                    target_idx = max(alignment_lag - 1, 0)  # 0 for nowcasting
+                    data_dict = self.prepare_data(
+                        alignment_lag=alignment_lag,
+                        start_date=start_date,
+                        end_date=estimate_end
+                    )
+
+                    if len(data_dict["y_forecast_target"]) < alignment_lag:
+                        if verbose:
+                            print(f"Skipping {estimate_end} due to insufficient forecast horizon.")
+                        continue
+
+                    self.fit(data_dict, poly_list=poly_list)
+                    forecast = self.predict(data_dict)
+
+                    target_idx = max(alignment_lag - 1, 0)
                     true = data_dict["y_forecast_target"].iloc[target_idx]
                     dt = data_dict["y_forecast_target"].index[target_idx]
+                    pred = forecast.iloc[target_idx, 0]
 
-                pred = forecast.iloc[target_idx, 0]
+                # Final filtering
                 if pd.isna(pred) or pd.isna(true):
                     if verbose:
                         print(f"Skipping {dt} due to NaN in prediction or target.")
@@ -307,11 +321,12 @@ class MIDAS:
                     print(f"⚠ Skipping {estimate_end} due to error: {e}")
                 continue
 
+        # Final assembly
+        if not preds or not targets:
+            raise ValueError("No valid forecasts generated.")
+
         preds = np.array(preds)
         targets = np.array(targets)
-
-        if len(preds) == 0 or len(targets) == 0:
-            raise ValueError("No valid forecasts generated.")
 
         rmse = sqrt(mean_squared_error(targets, preds))
         results_df = pd.DataFrame({"preds": preds, "targets": targets}, index=pd.DatetimeIndex(dates))
@@ -354,7 +369,13 @@ def midas_compare(low_freq_series, model_specs, hf_lags, lf_lags, alignment_lag,
         hf_series = spec.get("high_freq_series", [])
         polys = spec.get("polys", [])
 
-        model_hf_lags = spec.get("hf_lags", hf_lags[:len(hf_series)])
+        # Handle AR-only model (no HF series)
+        if len(hf_series) == 0:
+            model_hf_lags = []
+            polys = []
+        else:
+            model_hf_lags = spec.get("hf_lags", hf_lags[:len(hf_series)])
+
         model_lf_lags = spec.get("lf_lags", lf_lags)
 
         print(f"Fitting model: {name}")
@@ -397,13 +418,20 @@ def midas_compare(low_freq_series, model_specs, hf_lags, lf_lags, alignment_lag,
         plt.plot(actual_series.index, actual_series.values,
                 label="Actual", color='black', linewidth=2, marker='o')
 
+        # Limit x-axis to actuals range
+        xlim_max = actual_series.index[-1]
+        plt.xlim(left=actual_series.index[0], right=xlim_max)
+
         styles = ['--', '-.', ':', (0, (3, 1, 1, 1))]
         colors = plt.cm.tab10.colors
 
         for idx, (name, (df_model, rmse)) in enumerate(forecast_results.items()):
+            # truncate model predictions to actuals range
+            df_model_trimmed = df_model[df_model.index <= xlim_max]
+
             plt.plot(
-                df_model.index,
-                df_model["preds"],
+                df_model_trimmed.index,
+                df_model_trimmed["preds"],
                 label=f"{name} (RMSE={rmse:.2f})",
                 linestyle=styles[idx % len(styles)],
                 color=colors[idx % len(colors)],
