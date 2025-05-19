@@ -1,0 +1,2 @@
+# MIDAS
+Mixed Data Sampling
