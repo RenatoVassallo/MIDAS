@@ -11,12 +11,8 @@ pycache/
 # Ignore notebook files and the minIO uploader script
 .ipynb_checkpoints
 */.ipynb_checkpoints/*
-#*.ipynb
-*.tar.gz
-notebooks/
-sessions/
-build/
-test.ipynb
 *.egg-info
 tutorial/Nowcasting_USA_Renato.ipynb
 tutorial/Nowcasting_USA_HandsOn.ipynb
+tutorial/submissions
+dist/
