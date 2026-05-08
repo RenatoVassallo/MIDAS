@@ -1,62 +1,50 @@
-# MIDAS: Mixed Data Sampling for Time-Series Nowcasting and Forecasting
+# MIDAS
 
-A generalized and extensible Python package for estimating MIDAS regressions — designed for both **nowcasting** and **forecasting** using low- and high-frequency time series data.
+Teaching-friendly Python tools for mixed-frequency nowcasting and forecasting, built around a single coherent workflow:
 
-This package builds upon and extends the ideas in the original `midaspy` package, offering:
+1. motivate mixed-frequency problems visually,
+2. benchmark simple baselines,
+3. estimate restricted MIDAS models,
+4. compare modern ML alternatives,
+5. augment forecasts with text features and evaluate decisions.
 
-- A flexible `MIDAS` class for end-to-end workflows
-- Support for **exp-Almon** and **Beta** polynomial lag weighting
-- Rolling forecast routines for pseudo real-time evaluation
-- Compatibility with arbitrary combinations of high-frequency regressors
+## Library highlights
 
----
+- `MIDAS.PanelBuilder`: builds the processed monthly and quarterly teaching panels
+- `MIDAS.BetaMIDASRegressor`: restricted Beta-MIDAS estimator with optional quarterly controls
+- `MIDAS.rolling_forecast`: generic expanding/rolling backtest helper for panel data
+- `MIDAS.align_monthly_to_quarter` and `MIDAS.stack_high_freq_lags`: mixed-frequency alignment helpers
+- `MIDAS.rmse`, `MIDAS.mae`, `MIDAS.dm_test`: lightweight forecast evaluation tools
+- `MIDAS.use_aer_style` and `MIDAS.PALETTE`: plotting style shared across all notebooks
 
-## 📚 Tutorials and Resources
 
-For detailed tutorials and examples, refer to the following notebooks:
+## Installation
 
-* [`tutorial/MIDAS_Tutorial.ipynb`](tutorial/MIDAS_Tutorial.ipynb): Demonstrates quarterly GDP nowcasting using a monthly leading indicator.
+Python `3.11` is required.
 
-For more comprehensive documentation, slides, and research materials, visit the [BSE Forecast NLP repository](https://github.com/RenatoVassallo/BSE-ForecastNLP).
-
----
-
-## 🚀 Features
-
-- ✅ Generalized `MIDAS` class with:
-  - `prepare_data`: frequency alignment + lag stacking
-  - `fit`: nonlinear optimization of weighted regressors
-  - `predict`: nowcast or forecast output
-  - `rolling_forecast`: expanding-window backtesting
-
-- ✅ Supports:
-  - **Multiple frequency combinations**: Daily, Business Daily, Monthly, Quarterly and Annual
-  - Arbitrary number of high-frequency regressors
-  - **Nowcasting** (`alignment_lag=0`)
-  - **Forecasting** (`alignment_lag ≥ 1`)
-
-- ✅ Polynomial lag weighting:
-  - `expalmon`: exponential Almon lag structure
-  - `beta`: standard beta functional form
-
-- ✅ Easy model comparison with `midas_compare` utility:
-  - Runs and evaluates multiple specifications
-  - Returns RMSEs and forecasts for side-by-side comparison
-
----
-
-## 📦 Installation
-
-Install the latest version:
+With `uv`:
 
 ```bash
-pip install https://github.com/RenatoVassallo/MIDAS/releases/download/0.1.0/midas-0.1.0-py3-none-any.whl
+uv sync --group dev
 ```
 
-## 📚 References
+Without `uv`:
 
-Ghysels, Santa-Clara & Valkanov (2006), Predicting Volatility: MIDAS Regressions.
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+pip install ipykernel jupyter nbclient nbconvert nbformat
+```
 
-## 📝 License
+Optional ML extras:
 
-This project is licensed under the MIT License.
+If `xgboost` or `shap` are unavailable, the notebooks fall back automatically
+to scikit-learn boosted trees and permutation importance.
+
+
+## References
+
+- Andreou, Ghysels, and Kourtellos (2010), *Regression Models with Mixed Sampling Frequencies*
+- Foroni, Marcellino, and Schumacher (2015), *U-MIDAS: MIDAS Regressions with Unrestricted Lag Polynomials*
+- Ghysels, Kvedaras, and Zemlys (2016), *Mixed Frequency Data Sampling Regression Models: The R Package midasr*

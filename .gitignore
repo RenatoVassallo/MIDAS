@@ -1,18 +1,22 @@
 .env
-.venv
+.venv/
+.cache/
 .DS_Store
-
-# Ignore all pycache directories
-pycache/
-
-# Ignore any .pyc files, which are compiled Python files
+.ipynb_checkpoints/
+__pycache__/
 *.pyc
-
-# Ignore notebook files and the minIO uploader script
-.ipynb_checkpoints
-*/.ipynb_checkpoints/*
-*.egg-info
-tutorial/Nowcasting_USA_Renato.ipynb
-tutorial/Nowcasting_USA_HandsOn.ipynb
-tutorial/submissions
+*.egg-info/
+build/
 dist/
+
+# Local backups and caches
+_archive/
+data/
+figures/
+scripts/
+notebooks/
+session3/
+
+# App- and experiment-specific leftovers from earlier repo phases
+AGENTS.md
+Justfile
