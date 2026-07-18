@@ -13,6 +13,7 @@ dependencies = [
   "pandas>=2.1",
   "scipy>=1.11",
   "scikit-learn>=1.4",
+  "statsmodels>=0.14",
   "matplotlib>=3.8",
   "requests>=2.31",
   "pyarrow>=14",
@@ -26,8 +27,12 @@ dev = [
   "nbconvert>=7.16",
   "nbformat>=5.10",
   "python-dotenv>=1.0",
+  "pytest>=8.0",
   "xgboost>=2.0",
   "shap>=0.44",
+  "openpyxl",
+  "xlsxwriter",
+  "MacroPy @ https://github.com/RenatoVassallo/MacroPy/releases/download/0.1.7/macropy-0.1.7-py3-none-any.whl",
 ]
 
 [build-system]

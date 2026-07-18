@@ -34,6 +34,21 @@ def almon_weights(coefs: np.ndarray, K: int) -> np.ndarray:
     return w / w.sum()
 
 
+def legendre_dictionary(n_lags: int, degree: int = 2) -> np.ndarray:
+    """``(n_lags, degree + 1)`` shifted-Legendre MIDAS dictionary.
+
+    An *unrestricted* alternative to the Beta and Almon weight functions: instead
+    of one weight vector, it returns a small orthogonal basis. Column ``l`` is the
+    degree-``l`` Legendre polynomial evaluated at ``n_lags`` equally spaced points
+    on ``[0, 1]``. Projecting a block of lags onto it, ``lags @ W``, yields a smooth
+    low-dimensional summary of the lag shape; the projected columns form the *group*
+    penalised together in :class:`~MIDAS.sparse.SparseGroupLasso` MIDAS regressions
+    (Babii, Ghysels and Striaukas, 2022).
+    """
+    x = np.linspace(0.0, 1.0, n_lags)
+    return np.polynomial.legendre.legvander(2.0 * x - 1.0, degree)
+
+
 def _as_2d(arr: np.ndarray | pd.DataFrame | pd.Series, *, name: str) -> np.ndarray:
     out = np.asarray(arr, dtype=float)
     if out.ndim == 1:

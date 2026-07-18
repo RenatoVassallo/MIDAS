@@ -32,7 +32,9 @@ def align_monthly_to_quarter(
         keep = df.index.month.isin([3 * (q - 1) + m for q in (1, 2, 3, 4) for m in range(1, end_month + 1)])
         df = df.loc[keep]
 
-    rule = "Q"
+    # Pandas 3 removed the bare "Q" alias. Use an explicit quarter-end rule so
+    # bridge aggregation behaves consistently across pandas versions.
+    rule = "QE-DEC"
     if method == "mean":
         out = df.resample(rule).mean()
     elif method == "last":
