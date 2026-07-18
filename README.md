@@ -1,31 +1,108 @@
 # MIDAS
 
-Teaching-friendly Python tools for mixed-frequency nowcasting and forecasting, built around a single coherent workflow:
+Mixed-frequency **nowcasting and forecasting** tools for Python. `MIDAS` turns a panel of
+monthly indicators and quarterly targets into a full pseudo-real-time workflow: it
+reconstructs exactly what was knowable at any past origin (respecting publication
+delays), runs a family of models through one uniform interface, backtests them without
+look-ahead, and reports point forecasts, bootstrapped bands, evaluation tables and
+publication-quality plots. It also ships the teaching materials it grew out of.
 
-1. motivate mixed-frequency problems visually,
-2. benchmark simple baselines,
-3. estimate restricted MIDAS models,
-4. compare modern ML alternatives,
-5. augment forecasts with text features and evaluate decisions.
+## Quick install
 
-## Library highlights
+Latest release (`0.2.1`), no build step:
 
-- `MIDAS.PanelBuilder`: builds the processed monthly and quarterly teaching panels
-- `MIDAS.BetaMIDASRegressor`: restricted Beta-MIDAS estimator with optional quarterly controls
-- `MIDAS.rolling_forecast`: generic expanding/rolling backtest helper for panel data
-- `MIDAS.align_monthly_to_quarter` and `MIDAS.stack_high_freq_lags`: mixed-frequency alignment helpers
-- `MIDAS.rmse`, `MIDAS.mae`, `MIDAS.dm_test`: lightweight forecast evaluation tools
-- `MIDAS.use_aer_style` and `MIDAS.PALETTE`: plotting style shared across all notebooks
-
-
-## Installation
-
-Python `3.11` is required.
+```bash
+pip install https://github.com/RenatoVassallo/MIDAS/releases/download/0.2.1/midas-0.2.1-py3-none-any.whl
+```
 
 With `uv`:
 
 ```bash
-uv sync --group dev
+uv add https://github.com/RenatoVassallo/MIDAS/releases/download/0.2.1/midas-0.2.1-py3-none-any.whl
+```
+
+Python `3.11` is required. Installing from source is described at the bottom.
+
+## What is inside
+
+**One contract, many models.** Every model implements `BaseNowcaster`:
+`fit(info) -> nowcast(info) -> NowcastResult`, where `info` is an `InformationSet` (the
+masked panel knowable at one origin). So benchmarks, a factor model and a machine-learning
+model are all driven the same way, and combining or backtesting them is uniform.
+
+- **Data and real time**
+  - `MetadataPanel`: monthly + quarterly frames with per-column metadata (frequency,
+    economic group, publication delay).
+  - `RealtimeEngine`: reconstructs the no-look-ahead information set at any origin; begin,
+    middle and end-of-month origins select genuinely different data as releases clear.
+
+- **Models**
+  - Benchmarks: `RandomWalkNowcaster`, `HistoricalMeanNowcaster`, `ARNowcaster`,
+    `BridgeNowcaster`, `ADLMIDASNowcaster`.
+  - `DFMNowcaster`: dynamic factor model (wraps `statsmodels` `DynamicFactorMQ`), with
+    optional group-block factors, native ragged-edge handling, a news decomposition and a
+    COVID-as-missing option.
+  - `SparseMIDASNowcaster`: sparse-group LASSO MIDAS (Babii, Ghysels and Striaukas), built
+    on the standalone `SparseGroupLasso` estimator and a Legendre dictionary.
+  - `CombinationNowcaster`: equal or performance-weighted ensembles.
+
+- **Backtesting and evaluation**
+  - `run_backtest` (intra-quarter origins) and `run_horizon_backtest` (h = 0, 1, ...),
+    both pseudo-real-time and expanding-window.
+  - `horizon_bands` / `bootstrap_quantiles`: bootstrapped predictive bands from a model's
+    own realised errors (no normality assumed).
+  - `horizon_rmse_table` and `horizon_table_latex`: matched-sample RMSE tables with
+    Diebold-Mariano stars; `rmse`, `mae`, `dm_test`, `evaluation_table`.
+  - `nowcast_plots`: vintage tracking (GDPNow style), fan charts, nowcast-evolution and
+    model-comparison figures.
+
+- **MIDAS estimators and weights**
+  - `BetaMIDASRegressor`, `beta_weights`, `almon_weights`, `legendre_dictionary`,
+    `align_monthly_to_quarter`, `stack_high_freq_lags`.
+
+- **Teaching helpers**
+  - `PanelBuilder` (processed teaching panels), `use_aer_style` and `PALETTE`.
+
+## Minimal example
+
+```python
+import pandas as pd
+from MIDAS import (MetadataPanel, VariableMeta, RealtimeEngine,
+                   DFMNowcaster, RandomWalkNowcaster, run_backtest)
+
+# 1. Wrap your data: date-indexed monthly and quarterly frames, one VariableMeta per column
+#    (monthly rows dated at the first of the month; quarterly at the first day of the end month).
+panel = MetadataPanel.from_frames(
+    monthly, quarterly,
+    [VariableMeta(column="ip",  frequency="M", group="activity", publication_delay_days=45),
+     VariableMeta(column="gdp", frequency="Q", group="activity", publication_delay_days=60)],
+)
+
+# 2. Reconstruct exactly what was known on 15 May 2019 (nothing released later is visible)
+engine = RealtimeEngine(panel)
+info = engine.information_set("2019-05-15", target="gdp", target_period="2019-06-01")
+
+# 3. Fit any model and read a nowcast (point + optional density)
+res = DFMNowcaster(factors=2).fit(info).nowcast(info)
+print(res.mean, res.std)
+
+# 4. Backtest a set of models, pseudo-real-time, expanding window
+results = run_backtest(
+    panel, "gdp",
+    {"RW": RandomWalkNowcaster(), "DFM": DFMNowcaster(factors=2)},
+    eval_start="2015-01-01",
+)
+```
+
+An end-to-end application (nowcasting the Peruvian national accounts) lives under
+`notebooks/DSAPM`, and the original teaching notebooks under `notebooks/`.
+
+## Install from source
+
+With `uv` (the `dev` group, notebook tooling and tests, installs by default):
+
+```bash
+uv sync
 ```
 
 Without `uv`:
@@ -37,14 +114,16 @@ pip install -e .
 pip install ipykernel jupyter nbclient nbconvert nbformat
 ```
 
-Optional ML extras:
-
-If `xgboost` or `shap` are unavailable, the notebooks fall back automatically
-to scikit-learn boosted trees and permutation importance.
-
+If `xgboost` or `shap` are unavailable, the ML helpers fall back automatically to
+scikit-learn boosted trees and permutation importance.
 
 ## References
 
-- Andreou, Ghysels, and Kourtellos (2010), *Regression Models with Mixed Sampling Frequencies*
-- Foroni, Marcellino, and Schumacher (2015), *U-MIDAS: MIDAS Regressions with Unrestricted Lag Polynomials*
-- Ghysels, Kvedaras, and Zemlys (2016), *Mixed Frequency Data Sampling Regression Models: The R Package midasr*
+- Ghysels, Santa-Clara and Valkanov (2004), *The MIDAS touch: mixed data sampling regressions*
+- Andreou, Ghysels and Kourtellos (2010), *Regression models with mixed sampling frequencies*
+- Mariano and Murasawa (2003), *A new coincident index of business cycles*
+- Giannone, Reichlin and Small (2008), *Nowcasting: the real-time informational content of macroeconomic data*
+- Banbura and Modugno (2014), *Maximum likelihood estimation of factor models on data sets with arbitrary pattern of missing data*
+- Babii, Ghysels and Striaukas (2022), *Machine learning time series regressions with an application to nowcasting*, JBES
+- Foroni, Marcellino and Schumacher (2015), *U-MIDAS: MIDAS regressions with unrestricted lag polynomials*
+- Diebold and Mariano (1995); Harvey, Leybourne and Newbold (1997), *Tests of equal predictive accuracy*
