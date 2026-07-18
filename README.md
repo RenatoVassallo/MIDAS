@@ -94,9 +94,6 @@ results = run_backtest(
 )
 ```
 
-An end-to-end application (nowcasting the Peruvian national accounts) lives under
-`notebooks/DSAPM`, and the original teaching notebooks under `notebooks/`.
-
 ## Install from source
 
 With `uv` (the `dev` group, notebook tooling and tests, installs by default):
