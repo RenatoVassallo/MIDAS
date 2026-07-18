@@ -1,6 +1,6 @@
 [project]
 name = "MIDAS"
-version = "0.2.0"
+version = "0.2.1"
 description = "Mixed-frequency nowcasting and forecasting tools with macro and text examples."
 authors = [
   { name = "Renato Vassallo", email = "renato.vassallo@bse.eu" }
