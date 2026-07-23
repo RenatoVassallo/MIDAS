@@ -19,7 +19,9 @@ because the harness visits all origins of a quarter consecutively.
 
 from __future__ import annotations
 
-from typing import Sequence
+import re
+from typing import Mapping, Sequence
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -56,8 +58,11 @@ class DFMNowcaster(BaseNowcaster):
         idiosyncratic_ar1: bool = True,
         standardize: bool = True,
         maxiter: int = 200,
+        tolerance: float = 1e-6,
         min_series_obs: int = 12,
         covid_window: tuple[str, str] | None = None,
+        suppress_fit_warnings: bool = True,
+        severe_warning_ratio: float = 25.0,
         name: str | None = None,
     ) -> None:
         self.factors = factors
@@ -67,11 +72,14 @@ class DFMNowcaster(BaseNowcaster):
         self.idiosyncratic_ar1 = idiosyncratic_ar1
         self.standardize = standardize
         self.maxiter = maxiter
+        self.tolerance = tolerance
         self.min_series_obs = min_series_obs
         # (start, end) months to treat as missing (COVID outlier control). The
         # Kalman filter interpolates them, so extreme pandemic observations neither
         # distort the factor estimates nor drive explosive nowcasts.
         self.covid_window = covid_window
+        self.suppress_fit_warnings = suppress_fit_warnings
+        self.severe_warning_ratio = severe_warning_ratio
         self._name = name or ("DFM" if isinstance(factors, int) else "DFM-blocks")
         # Two-level cache. EM parameters are keyed by the origin's *quarter* (they move
         # slowly), the filtered results by the exact origin. A given origin's filtered
@@ -80,6 +88,7 @@ class DFMNowcaster(BaseNowcaster):
         self._applied_key: pd.Timestamp | None = None
         self._cached_results = None
         self.results_ = None
+        self._fit_diagnostics: dict[str, object] = {}
 
     # ----------------------------------------------------------------- internals
     def _frames(self, info: InformationSet) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
@@ -96,13 +105,36 @@ class DFMNowcaster(BaseNowcaster):
         return monthly, quarterly, m_vars
 
     def _factor_spec(self, info: InformationSet, m_vars: list[str], q_vars: list[str]):
-        """Return the ``factors`` argument for ``DynamicFactorMQ``."""
+        """Return the ``factors`` argument for ``DynamicFactorMQ``.
+
+        ``factors`` may be:
+
+        * an ``int`` (that many global factors);
+        * ``"groups"`` (a global factor plus one block factor per metadata
+          group);
+        * a ``Mapping`` of block name to the variables in that block (a global
+          factor plus one factor per named block). Variables not listed load on
+          the global factor only. This is the custom-block case, e.g. a two-block
+          real-activity vs survey/soft medium DFM.
+        """
         if isinstance(self.factors, int):
             return self.factors
+        if isinstance(self.factors, Mapping):
+            var_block: dict[str, str] = {}
+            for block, block_vars in self.factors.items():
+                for v in block_vars:
+                    var_block[v] = str(block)
+            spec: dict[str, list[str]] = {}
+            for col in m_vars:
+                block = var_block.get(col)
+                spec[col] = ["Global", block] if block else ["Global"]
+            for col in q_vars:
+                spec[col] = ["Global"]
+            return spec
         if self.factors == "groups":
             if info.metadata is None:
                 raise ValueError("factors='groups' needs info.metadata")
-            spec: dict[str, list[str]] = {}
+            spec = {}
             for col in m_vars:
                 spec[col] = ["Global", info.metadata.group_of(col)]
             for col in q_vars:
@@ -123,6 +155,103 @@ class DFMNowcaster(BaseNowcaster):
             standardize=self.standardize,
         )
 
+    def _collect_fit_diagnostics(self, captured: list[warnings.WarningMessage]) -> dict[str, object]:
+        """Summarize known statsmodels fit warnings without flooding stdout."""
+
+        diag: dict[str, object] = {
+            "warning_count": len(captured),
+            "nonstationary_start": 0,
+            "llf_decrease_revert": 0,
+            "maxiter_warning": 0,
+            "unknown_warning": 0,
+            "max_convergence_ratio": np.nan,
+            "warning_summary": "",
+        }
+        max_ratio = np.nan
+        unknown: list[str] = []
+
+        for item in captured:
+            msg = str(item.message)
+            if "Non-stationary starting autoregressive parameters found" in msg:
+                diag["nonstationary_start"] = int(diag["nonstationary_start"]) + 1
+                continue
+            if "Log-likelihood decreased at EM iteration" in msg:
+                diag["llf_decrease_revert"] = int(diag["llf_decrease_revert"]) + 1
+                continue
+            if "EM reached maximum number of iterations" in msg:
+                diag["maxiter_warning"] = int(diag["maxiter_warning"]) + 1
+                crit = re.search(r"convergence criterion=([0-9.eE+-]+)", msg)
+                tol = re.search(r"tolerance was ([0-9.eE+-]+)", msg)
+                if crit and tol:
+                    ratio = float(crit.group(1)) / max(float(tol.group(1)), 1e-12)
+                    max_ratio = ratio if not np.isfinite(max_ratio) else max(max_ratio, ratio)
+                continue
+            diag["unknown_warning"] = int(diag["unknown_warning"]) + 1
+            unknown.append(msg)
+
+        diag["max_convergence_ratio"] = float(max_ratio) if np.isfinite(max_ratio) else np.nan
+        parts: list[str] = []
+        if diag["nonstationary_start"]:
+            parts.append(f"nonstationary_start={diag['nonstationary_start']}")
+        if diag["llf_decrease_revert"]:
+            parts.append(f"llf_revert={diag['llf_decrease_revert']}")
+        if diag["maxiter_warning"]:
+            ratio = diag["max_convergence_ratio"]
+            if np.isfinite(ratio):
+                parts.append(f"maxiter={diag['maxiter_warning']} (ratio={ratio:.2f}x tol)")
+            else:
+                parts.append(f"maxiter={diag['maxiter_warning']}")
+        if diag["unknown_warning"]:
+            parts.append(f"unknown={diag['unknown_warning']}")
+            diag["unknown_messages"] = " | ".join(unknown[:3])
+        diag["warning_summary"] = "; ".join(parts)
+        return diag
+
+    def _fit_model(self, model, *, origin: pd.Timestamp):
+        """Fit the DFM while converting verbose statsmodels warnings into diagnostics."""
+
+        with warnings.catch_warnings(record=True) as caught:
+            if self.suppress_fit_warnings:
+                warnings.simplefilter("always")
+            results = model.fit(
+                disp=False,
+                maxiter=self.maxiter,
+                tolerance=self.tolerance,
+                full_output=0,
+                llf_decrease_action="revert",
+            )
+        self._fit_diagnostics = self._collect_fit_diagnostics(list(caught))
+        mle_retvals = getattr(results, "mle_retvals", None) or {}
+        em_iter = mle_retvals.get("iter", np.nan)
+        em_iter = int(em_iter) if np.isfinite(em_iter) else np.nan
+        self._fit_diagnostics.update(
+            {
+                "origin": str(pd.Timestamp(origin).date()),
+                "em_iterations": em_iter,
+                "em_maxiter": int(self.maxiter),
+                "em_tolerance": float(self.tolerance),
+            }
+        )
+        ratio = float(self._fit_diagnostics.get("max_convergence_ratio", np.nan))
+        severe = int(self._fit_diagnostics.get("unknown_warning", 0)) > 0
+        severe = severe or (
+            int(self._fit_diagnostics.get("maxiter_warning", 0)) > 0
+            and np.isfinite(ratio)
+            and ratio > float(self.severe_warning_ratio)
+        )
+        self._fit_diagnostics["severe_warning"] = severe
+        if not self.suppress_fit_warnings:
+            for item in caught:
+                warnings.warn(str(item.message), item.category, stacklevel=2)
+        elif severe:
+            summary = str(self._fit_diagnostics.get("warning_summary", "optimizer warning"))
+            warnings.warn(
+                f"DFM fit at {pd.Timestamp(origin).date()} ended with: {summary}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        return results
+
     # -------------------------------------------------------------------- fit/now
     def fit(self, info: InformationSet) -> "DFMNowcaster":
         pkey = pd.Period(pd.Timestamp(info.origin), freq="Q")
@@ -137,7 +266,7 @@ class DFMNowcaster(BaseNowcaster):
                     c for c in monthly.columns if monthly[c].notna().sum() >= self.min_series_obs
                 ]
                 model = self._build_model(monthly[self._active_cols], quarterly, info)
-                self._cached_results = model.fit(disp=False, maxiter=self.maxiter)
+                self._cached_results = self._fit_model(model, origin=info.origin)
                 self._param_key = pkey
                 self.results_ = self._cached_results
             else:
@@ -198,7 +327,13 @@ class DFMNowcaster(BaseNowcaster):
                                      extra={"diverged": True})
         return NowcastResult(mean=mean, std=std, model=self.name,
                              extra={"factors": self.factors,
-                                    "end_month": str(pd.Period(pd.Timestamp(info.target_period), freq="M"))})
+                                    "end_month": str(pd.Period(pd.Timestamp(info.target_period), freq="M")),
+                                    "dfm_warning_count": int(self._fit_diagnostics.get("warning_count", 0)),
+                                    "dfm_warning_summary": str(self._fit_diagnostics.get("warning_summary", "")),
+                                    "dfm_maxiter_hit": bool(int(self._fit_diagnostics.get("maxiter_warning", 0)) > 0),
+                                    "dfm_convergence_ratio": float(self._fit_diagnostics.get("max_convergence_ratio", np.nan)),
+                                    "dfm_em_iterations": int(self._fit_diagnostics.get("em_iterations", np.nan))
+                                    if np.isfinite(self._fit_diagnostics.get("em_iterations", np.nan)) else np.nan})
 
     # ------------------------------------------------------------------- helpers
     def smoothed_factors(self) -> pd.DataFrame:

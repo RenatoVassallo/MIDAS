@@ -23,12 +23,27 @@ from typing import Mapping, Sequence
 import numpy as np
 import pandas as pd
 
+try:  # progress bars are an optional convenience, never a hard requirement
+    from tqdm.auto import tqdm
+except ModuleNotFoundError:  # pragma: no cover
+    class tqdm:  # noqa: N801  minimal no-op stand-in
+        def __init__(self, iterable=None, **kwargs):
+            self._it = [] if iterable is None else iterable
+
+        def __iter__(self):
+            return iter(self._it)
+
+        def set_postfix_str(self, *args, **kwargs):
+            pass
+
+        @staticmethod
+        def write(*args, **kwargs):
+            print(*args)
+
 from .base import BaseNowcaster
+from .evaluation import rmse
 from .metadata import MetadataPanel
 from .realtime import RealtimeEngine
-
-from collections.abc import Sequence
-import pandas as pd
 
 DAY_PARTS: tuple[tuple[str, int], ...] = (
     ("begin", 1),
@@ -48,61 +63,55 @@ def make_origin_grid(
     quarter: pd.Timestamp,
     month_offsets: Sequence[int] = MONTH_OFFSETS,
     day_parts: Sequence[tuple[str, int]] = DAY_PARTS,
-    *,
-    daily: bool = False,
 ) -> list[tuple[pd.Timestamp, int, str]]:
-    """
-    Origins for nowcasting `quarter`.
+    """Coarse intra-quarter origins for nowcasting ``quarter``.
 
-    Returns
-    -------
-    list of tuples:
-        (origin_date, relative_month, day_label)
+    One origin per (month offset, day-part), e.g. begin/mid/end across the months
+    around the quarter. For the finer, continuous release-cycle sweep use
+    :func:`make_daily_origin_grid` with :func:`run_release_cycle_backtest`.
+
+    Returns a list of ``(origin_date, relative_month, day_label)``.
     """
     end_month_start = pd.Timestamp(quarter)
     grid = []
-
     for off in month_offsets:
         month_start = end_month_start + pd.DateOffset(months=off)
-
-        if daily:
-            month_end = month_start + pd.offsets.MonthEnd(0)
-
-            for origin in pd.date_range(
-                start=month_start,
-                end=month_end,
-                freq="D",
-            ):
-                grid.append(
-                    (
-                        origin,
-                        off,
-                        origin.strftime("%d"),
-                    )
-                )
-
-        else:
-            for label, day in day_parts:
-                origin = month_start.replace(day=day)
-                grid.append((origin, off, label))
-
+        for label, day in day_parts:
+            grid.append((month_start.replace(day=day), off, label))
     return grid
+
+
+def publication_date(target_period: pd.Timestamp, delay_days: int) -> pd.Timestamp:
+    """Official publication date of a target quarter: quarter end + ``delay_days``.
+
+    ``target_period`` follows the panel convention (first day of the quarter's end
+    month), so the quarter end is ``target_period + MonthEnd(1)``.
+    """
+    return quarter_end(target_period) + pd.Timedelta(days=int(delay_days))
 
 
 def make_daily_origin_grid(
     publication_date: pd.Timestamp,
     days_before: int = 180,
+    *,
+    days_after: int = 0,
+    step_days: int = 1,
 ) -> list[pd.Timestamp]:
-    """Daily forecast origins from `days_before` through publication day."""
-    publication_date = pd.Timestamp(publication_date)
+    """Daily (or ``step_days``-spaced) forecast origins across the release cycle.
 
-    return list(
-        pd.date_range(
-            start=publication_date - pd.Timedelta(days=days_before),
-            end=publication_date,
-            freq="D",
-        )
-    )
+    Sweeps from ``days_before`` days before the target's official ``publication_date``
+    to ``days_after`` days after it. This is the x-axis of a Bank-of-England-style
+    'horse race through the release cycle': plotting a model's RMSE against
+    ``days_to_publication = origin - publication_date`` (negative before publication)
+    shows accuracy improving in a step pattern as each release clears its lag.
+
+    Returns a list of origin timestamps.
+    """
+    pub = pd.Timestamp(publication_date)
+    return list(pd.date_range(start=pub - pd.Timedelta(days=days_before),
+                              end=pub + pd.Timedelta(days=days_after),
+                              freq=f"{int(step_days)}D"))
+
 
 def quarter_timestamp(period: pd.Period) -> pd.Timestamp:
     """Panel convention: a quarter is dated at the first day of its end month."""
@@ -267,3 +276,150 @@ def run_backtest(
         summary = ", ".join(f"{n}: {c}" for n, c in total.items())
         print(f"[run_backtest] non-finite/failed nowcasts by model -> {summary}")
     return pd.DataFrame(rows)
+
+
+
+def _release_cycle_quarter(
+    Q: pd.Timestamp,
+    panel: MetadataPanel,
+    target: str,
+    models: Mapping[str, BaseNowcaster],
+    *,
+    delay: int,
+    days_before: int,
+    days_after: int,
+    step_days: int,
+    min_train: int,
+    verbose: bool,
+) -> tuple[list[dict], dict[str, int]]:
+    """One quarter's full release-cycle sweep.
+
+    Quarters are independent, so this is the unit of parallel work. The models are
+    **deep-copied** here so each quarter (and each worker process) gets fresh, unshared
+    state; behaviour is identical to the sequential loop because every model already
+    re-estimates per quarter. Returns ``(rows, failures)``.
+    """
+    import copy
+
+    engine = RealtimeEngine(panel)
+    y_true = panel.quarterly[target].loc[Q]
+    if pd.isna(y_true):
+        return [], {}
+    models = {name: copy.deepcopy(m) for name, m in models.items()}
+
+    pub = publication_date(Q, delay)
+    q_end = quarter_end(Q)
+    origins = make_daily_origin_grid(pub, days_before=days_before, days_after=days_after,
+                                     step_days=step_days)
+
+    rows: list[dict] = []
+    failures: dict[str, int] = {}
+    last_count: int | None = None
+    cached: dict[str, tuple[float, float | None]] = {}
+
+    for origin in origins:
+        info = engine.information_set(origin, target, target_period=Q)
+        if pd.notna(info.quarterly.at[Q, target]):
+            continue
+        if info.observed_quarters().size < min_train:
+            continue
+        # The information set only grows as the origin advances, so an unchanged non-NaN
+        # cell count means an identical panel: refit only at these changepoints.
+        count = int(info.monthly.notna().to_numpy().sum() + info.quarterly.notna().to_numpy().sum())
+        if count != last_count:
+            for name, model in models.items():
+                try:
+                    res = model.fit(info).nowcast(info)
+                    cached[name] = (res.mean, res.std)
+                except Exception as exc:
+                    cached[name] = (float("nan"), None)
+                    failures[name] = failures.get(name, 0) + 1
+                    if verbose:
+                        print(f"[{name}] {Q.date()} @ {origin.date()}: {type(exc).__name__}: {exc}")
+            last_count = count
+        for name, (yhat, ystd) in cached.items():
+            rows.append({
+                "target": target, "ref_quarter": Q, "origin_date": origin,
+                "days_to_publication": (origin - pub).days,
+                "days_to_quarter_end": (origin - q_end).days,
+                "model": name, "y_true": float(y_true), "y_hat": float(yhat),
+                "y_std": None if ystd is None else float(ystd),
+            })
+    return rows, failures
+
+
+def run_release_cycle_backtest(
+    panel: MetadataPanel,
+    target: str,
+    models: Mapping[str, BaseNowcaster],
+    *,
+    eval_start: str | pd.Timestamp,
+    eval_end: str | pd.Timestamp | None = None,
+    days_before: int = 180,
+    days_after: int = 0,
+    step_days: int = 1,
+    min_train: int = 20,
+    verbose: bool = False,
+    show_progress: bool = True,
+    n_jobs: int = 1,
+) -> pd.DataFrame:
+    """Backtest across the full release cycle at daily resolution.
+
+    Each quarter's 180-day sweep is independent, so set ``n_jobs > 1`` (or ``-1`` for every
+    core) to run the quarters in parallel with joblib; the models are deep-copied per quarter
+    so nothing is shared between workers. ``n_jobs=1`` keeps the sequential path with a
+    progress bar. Expensive models (the DFM refits per quarter, the pooled MIDAS and SC-MIDAS
+    refit per release) dominate the cost, so parallelism gives a near-linear speed-up.
+    """
+    q_index = panel.quarterly.index
+    delay = panel.delay_of(target)
+    eval_start = pd.Timestamp(eval_start)
+    eval_end = q_index[-1] if eval_end is None else pd.Timestamp(eval_end)
+    quarters = list(q_index[(q_index >= eval_start) & (q_index <= eval_end)])
+
+    kw = dict(delay=delay, days_before=days_before, days_after=days_after,
+              step_days=step_days, min_train=min_train, verbose=verbose)
+
+    rows: list[dict] = []
+    failures: dict[str, int] = {}
+    if n_jobs == 1:
+        for Q in tqdm(quarters, desc="Release-cycle backtest", unit="quarter",
+                      disable=not show_progress, dynamic_ncols=True):
+            r, f = _release_cycle_quarter(Q, panel, target, models, **kw)
+            rows.extend(r)
+            for k, v in f.items():
+                failures[k] = failures.get(k, 0) + v
+    else:
+        from joblib import Parallel, delayed
+        results = Parallel(n_jobs=n_jobs, verbose=10 if show_progress else 0)(
+            delayed(_release_cycle_quarter)(Q, panel, target, models, **kw) for Q in quarters
+        )
+        for r, f in results:
+            rows.extend(r)
+            for k, v in f.items():
+                failures[k] = failures.get(k, 0) + v
+
+    if failures:
+        print("[run_release_cycle_backtest] failed nowcasts by model -> "
+              + ", ".join(f"{name}: {count}" for name, count in failures.items()))
+    return pd.DataFrame(rows)
+
+
+def release_cycle_rmse(
+    bt: pd.DataFrame,
+    models: Sequence[str],
+    *,
+    by: str = "days_to_publication",
+    exclude_years: Sequence[int] = (),
+) -> pd.DataFrame:
+    """RMSE of each model as a function of ``by`` (default: days to publication).
+
+    The index is the lead coordinate and the columns are the models: the data behind the
+    horse-race step chart (:func:`MIDAS.plot_release_cycle_rmse`). Each model is scored on
+    its own finite rows; with a daily grid coverage is near-complete, so this is close to
+    a matched comparison.
+    """
+    d = bt[~bt.ref_quarter.dt.year.isin(list(exclude_years))]
+    out = {m: d[d.model == m].groupby(by).apply(lambda x: rmse(x.y_true, x.y_hat), include_groups=False)
+           for m in models}
+    return pd.DataFrame(out).sort_index()

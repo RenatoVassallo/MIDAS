@@ -17,15 +17,64 @@ import matplotlib.pyplot as plt
 from .plotting import PALETTE
 
 # Consistent colour / weight per model across every figure.
-_STYLE: dict[str, dict] = {
-    "DFM":       dict(color=PALETTE.get("myblue", "#1f4e79"), lw=2.6, zorder=5),
-    "sg-LASSO":  dict(color=PALETTE.get("mygreen", "#2e7d32"), lw=2.6, zorder=5),
-    "AR(2)":     dict(color=PALETTE.get("myred", "#c0392b"), lw=1.8),
-    "AR":        dict(color=PALETTE.get("myred", "#c0392b"), lw=1.8),
-    "Bridge":    dict(color="#e08214", lw=1.8),
-    "ADL-MIDAS": dict(color="#8073ac", lw=1.8),
-    "RW":        dict(color="0.45", lw=1.6, ls="--"),
-    "Mean":      dict(color="0.7", lw=1.4, ls=":"),
+_STYLE = {
+    # Proposed models (emphasized)
+    "DFM": dict(
+        color=PALETTE.get("linknavy", "#28468C"),
+        lw=2.8,
+        zorder=6,
+    ),
+
+    "sg-LASSO": dict(
+        color="#D4A000",          # darker gold
+        lw=2.8,
+        zorder=6,
+    ),
+
+    "GB-MIDAS": dict(
+        color="#762A83",          # purple: the non-linear ML entry
+        lw=2.6,
+        zorder=6,
+    ),
+
+    "SC-MIDAS": dict(
+        color=PALETTE.get("mygreen", "#2E7D32"),
+        lw=2.5,
+        zorder=5,
+    ),
+
+    # Benchmarks
+    "Bridge": dict(
+        color="#E67E22",          # vivid orange
+        lw=1.9,
+    ),
+
+    "P-MIDAS": dict(
+        color="#7B68B3",          # richer purple
+        lw=1.9,
+    ),
+
+    "Q-AR": dict(
+        color=PALETTE.get("myred", "#C0392B"),
+        lw=1.9,
+    ),
+
+    "M-AR": dict(
+        color="#4F81BD",          # steel blue
+        lw=1.9,
+    ),
+
+    "RW": dict(
+        color="0.45",
+        lw=1.6,
+        ls="--",
+    ),
+
+    "Mean": dict(
+        color="0.72",
+        lw=1.4,
+        ls=":",
+    ),
 }
 
 
@@ -285,6 +334,39 @@ def plot_forecast_fan(
     ax.axhline(0, color="0.75", lw=0.7, zorder=0)
     ax.set_ylabel("YoY growth (%)")
     ax.set_title(title or "Nowcast and forecast path with bootstrapped bands")
+    ax.legend(fontsize=8, ncol=2)
+    return ax
+
+
+def plot_release_cycle_rmse(
+    bt: pd.DataFrame,
+    models: Sequence[str],
+    *,
+    by: str = "days_to_publication",
+    exclude_years: Sequence[int] = (2020, 2021),
+    ax: plt.Axes | None = None,
+    title: str | None = None,
+) -> plt.Axes:
+    """Horse-race RMSE step chart across the release cycle (Bank of England style).
+
+    Expects the frame from :func:`MIDAS.run_release_cycle_backtest`. The x-axis is
+    ``by`` (days to publication, negative before publication); each model's RMSE is a
+    step function that drops as releases arrive. Uses ``steps-post`` so a level holds
+    until the next release, matching how the information set actually updates.
+    """
+    from .backtest import release_cycle_rmse
+
+    curves = release_cycle_rmse(bt, models, by=by, exclude_years=exclude_years)
+    if ax is None:
+        _, ax = plt.subplots(figsize=(8, 5))
+    for m in models:
+        if m in curves.columns:
+            ax.plot(curves.index, curves[m], drawstyle="steps-post", label=m, **_style(m))
+    ax.set_xlabel("Days to publication" if by == "days_to_publication" else by)
+    ax.set_ylabel("RMSE (pp)")
+    ax.set_title(title or "RMSEs through the release cycle")
+    ax.set_xlim(-150, 0)
+    ax.set_xticks([-150, -120, -90, -60, -30, 0])
     ax.legend(fontsize=8, ncol=2)
     return ax
 

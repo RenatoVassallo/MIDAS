@@ -17,6 +17,7 @@ dependencies = [
   "matplotlib>=3.8",
   "requests>=2.31",
   "pyarrow>=14",
+  "tqdm>=4.66",
 ]
 
 [dependency-groups]

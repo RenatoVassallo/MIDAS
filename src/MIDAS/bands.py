@@ -97,3 +97,44 @@ def horizon_bands(
                      "rmse": float(np.sqrt(np.mean(e ** 2))) if len(e) else np.nan,
                      "n": len(e)})
     return pd.DataFrame(rows).set_index(by).sort_index()
+
+
+def release_cycle_bands(rc, model, *, index_col="info_index", n_bins=5,
+                        levels=(0.5, 0.68, 0.9), exclude_years=(), min_quarters=10):
+    """Real-time empirical predictive bands for a model, conditioned on the Information Index.
+
+    The honest, central-bank-standard nowcast-uncertainty measure for a combination: at each origin,
+    the interval at probability ``level`` is the empirical quantile band of the model's past
+    out-of-sample residuals (``y_true - y_hat``) from EARLIER quarters in the same Information-Index
+    bin, excluding ``exclude_years`` (e.g. COVID). One residual per (past quarter, bin) is used so a
+    quarter with many origins in a bin is not over-weighted. Adds ``lo_<level>``/``hi_<level>``
+    columns and a ``pit`` (probability integral transform) column for calibration testing; a
+    well-calibrated density has uniform PIT and coverage matching the nominal level.
+    """
+    import numpy as np
+    import pandas as pd
+
+    d = rc[rc.model == model].copy()
+    edges = np.linspace(0.0, 1.0, n_bins + 1)
+    d["bin"] = np.clip(np.digitize(d[index_col].to_numpy(), edges[1:-1]), 0, n_bins - 1)
+    d["resid"] = d.y_true - d.y_hat
+    d["yr"] = pd.to_datetime(d.ref_quarter).dt.year
+    perqb = d.groupby(["ref_quarter", "bin"], as_index=False).resid.mean()
+    perqb["yr"] = pd.to_datetime(perqb.ref_quarter).dt.year
+    out = []
+    for Q in sorted(d.ref_quarter.unique()):
+        for b, g in d[d.ref_quarter == Q].groupby("bin"):
+            past = perqb[(perqb.ref_quarter < Q) & (perqb.bin == b) & (~perqb.yr.isin(exclude_years))].resid.dropna()
+            g = g.copy()
+            if len(past) >= min_quarters:
+                for lv in levels:
+                    a = (1 - lv) / 2
+                    g[f"lo_{lv}"] = g.y_hat + past.quantile(a)
+                    g[f"hi_{lv}"] = g.y_hat + past.quantile(1 - a)
+                g["pit"] = (past.to_numpy()[None, :] <= g.resid.to_numpy()[:, None]).mean(axis=1)
+            else:
+                for lv in levels:
+                    g[f"lo_{lv}"] = np.nan; g[f"hi_{lv}"] = np.nan
+                g["pit"] = np.nan
+            out.append(g)
+    return pd.concat(out, ignore_index=True)

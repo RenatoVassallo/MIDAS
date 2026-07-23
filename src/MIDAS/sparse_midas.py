@@ -288,20 +288,10 @@ class SparseMIDASNowcaster(BaseNowcaster):
     def _estimate(self, info: InformationSet, target: str, q_index: pd.DatetimeIndex, h: int) -> None:
         y_all = info.quarterly[target]
         Zdict, groups, m_vars = self._build_dictionary(info, q_index)
-        # standardise dictionary columns on their observed values, then mean-impute (-> 0)
-        mu, sd = np.nanmean(Zdict, axis=0), np.nanstd(Zdict, axis=0)
-        sd[~np.isfinite(sd) | (sd == 0)] = 1.0
-        Zstd = np.where(np.isfinite((Zdict - mu) / sd), (Zdict - mu) / sd, 0.0)
 
-        # unpenalised covariates: intercept and the last released target value. The AR term
-        # is y_{t-1}, not y_t: at h=0 the target IS y_t (a leak) and y_t is unpublished anyway.
-        U = np.column_stack([np.ones(len(q_index)), y_all.shift(1).to_numpy()])
-        n_unpen = U.shape[1]
-        X = np.column_stack([U, Zstd])
-        group_index = [g + n_unpen for g in groups]
-
-        # direct h-step: row t carries features Z_t and realised target y_{t+h} (both masked,
-        # so unreleased quarters drop out -> no look-ahead).
+        # direct h-step training rows: row t carries features Z_t and realised target
+        # y_{t+h}, and needs a released lag y_{t-1}. Both target series are masked, so
+        # unreleased quarters drop out -> no look-ahead.
         y_shift = y_all.shift(-h)
         train = y_shift.notna().to_numpy() & y_all.shift(1).notna().to_numpy()
         if self.covid_quarters:
@@ -311,6 +301,28 @@ class SparseMIDASNowcaster(BaseNowcaster):
             tgt_q = pd.PeriodIndex(q_index, freq="Q") + h
             covid_p = [pd.Period(pd.Timestamp(q), freq="Q") for q in self.covid_quarters]
             train &= ~np.isin(tgt_q, covid_p)
+
+        # Standardise dictionary columns on the TRAINING rows only, then mean-impute (-> 0).
+        # Moments over the whole index would be dominated by the forward-filled tail of
+        # not-yet-released quarters (every post-origin row repeats the last release), which
+        # biases mu/sd toward the most recent observation and makes them origin-dependent.
+        Ztr = Zdict[train]
+        col_ok = np.isfinite(Ztr).any(axis=0)  # columns with at least one training value
+        mu = np.zeros(Zdict.shape[1])
+        sd = np.ones(Zdict.shape[1])
+        if col_ok.any():
+            mu[col_ok] = np.nanmean(Ztr[:, col_ok], axis=0)
+            sd_ok = np.nanstd(Ztr[:, col_ok], axis=0)
+            sd_ok[~np.isfinite(sd_ok) | (sd_ok == 0)] = 1.0
+            sd[col_ok] = sd_ok
+        Zstd = np.where(np.isfinite((Zdict - mu) / sd), (Zdict - mu) / sd, 0.0)
+
+        # unpenalised covariates: intercept and the last released target value. The AR term
+        # is y_{t-1}, not y_t: at h=0 the target IS y_t (a leak) and y_t is unpublished anyway.
+        U = np.column_stack([np.ones(len(q_index)), y_all.shift(1).to_numpy()])
+        n_unpen = U.shape[1]
+        X = np.column_stack([U, Zstd])
+        group_index = [g + n_unpen for g in groups]
 
         est = SparseGroupLasso(alpha=self.alpha, loss=self.loss, huber_delta=self.huber_delta,
                                n_lambda=self.n_lambda, val_frac=self.val_frac, one_se=True)
@@ -335,9 +347,27 @@ class SparseMIDASNowcaster(BaseNowcaster):
             obs = y_all.dropna()
             y_lag = float(obs.iloc[-1]) if len(obs) else 0.0
         x = np.concatenate([np.asarray([1.0, float(y_lag)]), z])
-        return NowcastResult(mean=float(st["est"].predict(x[None, :])[0]), model=self.name,
+        coef = st["est"].coef_
+        raw = float(x @ coef)
+        anchor = float(x[: st["n_unpen"]] @ coef[: st["n_unpen"]])  # unpenalised part: intercept + AR*y_lag
+
+        # Stability guard (mirrors the DFM divergence guard). A noisy one-standard-error penalty can
+        # pick too small a lambda on a volatile post-break quarter, so the dictionary block
+        # extrapolates far from the AR baseline (observed: a 2022Q1 GDP nowcast of 24, and ~15 earlier
+        # in the same quarter, vs a ~4 realised). We guard on the *dictionary contribution*
+        # ``raw - anchor`` rather than the level: a genuine high-growth quarter has a high anchor too,
+        # so its contribution is small and it is never clipped, whereas a blow-up is driven by the
+        # dictionary alone. The scale is a robust MAD of the target (COVID outliers do not widen it).
+        mean, guarded = raw, False
+        y_obs = info.quarterly[info.target].dropna()
+        if len(y_obs) >= 8:
+            scale = max(float((y_obs - y_obs.median()).abs().median()) * 1.4826, 1e-6)
+            if abs(raw - anchor) > 3.0 * scale:      # dictionary extrapolating far from the AR baseline
+                mean, guarded = anchor, True
+        return NowcastResult(mean=float(mean), model=self.name,
                              extra={"lambda": st["est"].lambda_, "horizon": h,
-                                    "n_selected": self.n_selected()})
+                                    "n_selected": self.n_selected(), "guarded": guarded,
+                                    "raw_pred": raw, "anchor": anchor})
 
     # ------------------------------------------------------------------- interpretability
     def _dict_coef(self) -> np.ndarray:

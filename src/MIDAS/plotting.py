@@ -9,6 +9,7 @@ PALETTE = {
     "myblue":   "#29466E",
     "myred":    "#802828",
     "mygreen":  "#2D6E50",
+    "myyellow":  "#E5A400",
     "linknavy": "#28468C",
     "pastgray": "#999999",
 }
