@@ -9,16 +9,16 @@ publication-quality plots. It also ships the teaching materials it grew out of.
 
 ## Quick install
 
-Latest release (`0.2.1`), no build step:
+Latest release (`0.2.2`), no build step:
 
 ```bash
-pip install https://github.com/RenatoVassallo/MIDAS/releases/download/0.2.1/midas-0.2.1-py3-none-any.whl
+pip install https://github.com/RenatoVassallo/MIDAS/releases/download/0.2.2/midas-0.2.2-py3-none-any.whl
 ```
 
 With `uv`:
 
 ```bash
-uv add https://github.com/RenatoVassallo/MIDAS/releases/download/0.2.1/midas-0.2.1-py3-none-any.whl
+uv add https://github.com/RenatoVassallo/MIDAS/releases/download/0.2.2/midas-0.2.2-py3-none-any.whl
 ```
 
 Python `3.11` is required. Installing from source is described at the bottom.
